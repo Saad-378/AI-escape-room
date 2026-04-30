@@ -1,0 +1,1361 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Escape room</title>
+    <style>
+        body { 
+            background: #000000; color: #ffffff; font-family: 'Courier New', monospace; 
+            display: flex; flex-direction: column; align-items: center; margin: 0; 
+            height: 100vh; justify-content: center;
+        }
+        
+        h2 { text-shadow: 0 0 10px #ffffff; margin-bottom: 5px;}
+        p { margin-top: 5px; color: #aaaaaa; }
+
+        .creds {
+            margin-top: 10px; font-size: 0.8em; color: #b7b6b6;
+        }
+
+        #gameWrapper {
+            position: relative;
+            width: 600px;
+            height: 400px;
+            border: 2px solid #333; 
+            box-shadow: 0 0 20px rgba(255, 255, 255, 0.1); 
+            background: #1a1a1a; 
+        }
+
+        canvas { display: block; }
+
+        #inventory { display: flex; gap: 10px; margin-top: 15px; }
+        .slot { 
+            width: 40px; height: 50px; background-color: #222; border: 2px solid #444; 
+            border-radius: 5px; display: flex; justify-content: center; align-items: center; 
+            font-size: 0.8em; color: yellow; position: relative;
+        }
+        .slot.active { border-color: #ffffff; box-shadow: 0 0 10px #ffffff; background-color: #333; }
+        .slot::before { content: attr(data-key); position: absolute; top: 2px; left: 4px; font-size: 0.7em; color: #777; }
+    </style>
+</head>
+<body>
+    <h2 id="roomTitle">AI escape room</h2>
+    <p id="roomDesc">You must shut off the AI data centers. Use the book and press E.</p>
+    
+    <div id="gameWrapper">
+        <canvas id="gameCanvas" width="600" height="400"></canvas>
+    </div>
+
+    <div id="inventory">
+        <div class="slot" id="slot-0" data-key="1"></div>
+        <div class="slot" id="slot-1" data-key="2"></div>
+        <div class="slot" id="slot-2" data-key="3"></div>
+        <div class="slot" id="slot-3" data-key="4"></div>
+        <div class="slot" id="slot-4" data-key="5"></div>
+    </div>
+    <div class="creds">Made by Saad and Guntaj</div>
+    <script>
+        // --- 1. ITEM CONFIGURATION & ASSET LOADING ---
+        const INTERACTABLE_TYPES = {
+                PC: { name: "Terminal", imageSrc: 'sprites/laptop.png', width: 60, height: 60 },
+                AUDIO_COMPUTER: { name: "Audio Terminal", imageSrc: 'sprites/audio_laptop.png', width: 60, height: 60 },
+                PRINTER: { name: "Printer", imageSrc: 'sprites/printer.png', width: 50, height: 50 },
+                TRASH_BIN: { name: "Trash Bin", imageSrc: 'sprites/garbage.png', width: 80, height: 60 },
+                BUTTON_RED: { name: "AI Fault", imageSrc: 'sprites/red.png', width: 90, height: 40 },
+                BUTTON_GREEN: { name: "Human Fault", imageSrc: 'sprites/green.png', width: 90, height: 40 },
+                KEYPAD: { name: "Keypad", imageSrc: 'sprites/keypad.png', width: 70, height: 60 },
+                LEVER: { name: "Lever", imageSrc: 'sprites/red.png', width: 65, height: 40 }
+            };
+
+        const interactableImages = {};
+        Object.keys(INTERACTABLE_TYPES).forEach(type => {
+            interactableImages[type] = new Image();
+            interactableImages[type].src = INTERACTABLE_TYPES[type].imageSrc;
+        });
+
+        const ITEM_TYPES = {
+            KEY: { name: "Rusty Key", imageSrc: 'sprites/key.png', baseWidth: 70, baseHeight: 48 },
+            JOURNAL: { name: "Journal", imageSrc: 'sprites/journal.png', baseWidth: 50, baseHeight: 70 } // Added Journal
+            };
+
+        // Dynamically add the 5 paper types
+        for (let i = 0; i < 5; i++) {
+            ITEM_TYPES[`PAPER_${i}`] = { 
+                name: "Case File", 
+                imageSrc: 'sprites/paper.png', // Placeholder filepath
+                baseWidth: 50, 
+                baseHeight: 50 
+            };
+        }
+
+        const itemImages = {};
+        Object.keys(ITEM_TYPES).forEach(type => {
+            itemImages[type] = new Image();
+            itemImages[type].src = ITEM_TYPES[type].imageSrc;
+        });
+
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+        const uiTitle = document.getElementById('roomTitle');
+        const uiDesc = document.getElementById('roomDesc');
+
+        // --- 2. GAME STATE ---
+        let gameWon = false;
+        let inventory = ["JOURNAL", null, null, null, null];
+        let activeSlot = 0;
+        let currentRoomIndex = 0;
+        let fadeAlpha = 0;
+        let fadeDirection = 0; 
+        let isAutoWalking = false;
+        let isUIOpen = false;
+        const player = { x: 50, y: 180, size: 25, speed: 4, color: '#3498db' };
+
+        // --- JOURNAL STATE ---
+        let journalCurrentPage = 0;
+        const journalPages = [
+            "\n\nThis is the book of convinience. It contains information to help you shut off the AI data centers and prevent their takeover. To do this, you will need to act, deceive, and break all 6 layers of security.",
+            "\n\nControls: WASD to move, E to interact, 1-5 to select items. Good luck.",
+            "\n\nTo appear as a AI, you need to be able to succesfuly defrintiate between human and AI images.",
+            "\n\nThe guard is malfunctioning. Although it avoids directly stating the password, there are flaws in its safeguards due to poor training data.",
+            "\n\nType as fast as the AI can speak. If you can keep up, you might be able to appear as a robot and bypass the audio lock. Otherwise, you'll have to try again.",
+            "\n\nTo pass this logical puzzle, you must move all rings to the rightmost tower. You can only move one ring at a time, and you can never place a larger ring on top of a smaller one. There is only one optimal solution.",
+            "\n\nThe increase in AI has resulted in many legal, moral, and ethical issues. Passing requires you to correctly identify who is at fault. Green is human fault, red is AI fault.",
+            "\n\nThe final lock is a 6-digit memory code, with parts of the code hidden within the rooms. This book can only assist you in finding it.",
+            "\n\n1: Amount of security rooms\n2: Number of interactables in the ethical dilemma room (Not including the door)\n3: Number of rings + towers in the logic puzzle",
+            "\n\n4: The number of images you must guess correctly in a row for the image puzzle, divided by 2\n5: The number of NPCs in this escape room\n6: The total number of different items you can pick up (including this book)"
+        ];
+        // --- HANOI PUZZLE STATE (ROOM 4) ---
+        let hanoiErrorFlashing = false;
+        let hanoiFlashVisible = true;
+        let hanoiPoles = [[5, 4, 3, 2, 1], [], []];
+        let hanoiSelectedPole = null;
+        let hanoiMoveIndex = 0;
+
+        // --- ETHICAL DILEMMA STATE (ROOM 5) ---
+        let ethicalScore = 0;
+        let ethicalFeedback = "";
+        let ethicalFeedbackTimer = 0;
+
+        const ethicalDilemmas = [
+            { text: "A self-driving delivery bot ignores a red light due to a corrupted visual sensor update, causing a severe traffic accident.", answer: "RED" }, // AI Fault
+            { text: "A hospital administrator overrides an AI's dosage warning because they were in a rush, leading to a patient receiving the wrong medication.", answer: "GREEN" }, // Human Fault
+            { text: "A facial recognition security system hallucinates a match and locks a legitimate employee out of the building during a critical server meltdown.", answer: "RED" }, // AI Fault
+            { text: "A user completely disables the safety protocols on their smart home heating system to bypass a limit, resulting in a fire.", answer: "GREEN" }, // Human Fault
+            { text: "An employee writes their master password on a sticky note and attaches it to the AI server monitor, allowing a hacker to breach the system.", answer: "GREEN" }, // Human Fault
+            { text: "An autonomous drone misinterprets sensor data and drops a package onto a crowded sidewalk, injuring pedestrians.", answer: "RED" }, // AI Fault
+            { text: "A driver ignores repeated alerts from their car’s lane assist system and causes a collision while texting.", answer: "GREEN" }, // Human Fault
+            { text: "A chatbot generates incorrect emergency instructions during a crisis due to a training data flaw.", answer: "RED" }, // AI Fault
+            { text: "A technician skips a required calibration step when installing an AI-controlled machine, leading to a malfunction.", answer: "GREEN" }, // Human Fault
+            { text: "An AI-powered financial system executes a massive unintended trade due to a bug in its decision-making algorithm.", answer: "RED" }, // AI Fault
+            { text: "A teacher uses AI to grade assignments, and the AI fails a student, even for reasons the student should not have failed.", answer: "GREEN" } // Human Fault
+        ];
+        
+        const hanoiColors = {
+            5: "#4B0082", // Dark Purple (New Bottom)
+            4: "#8B0000", // Dark Red (Bottom)
+            3: "#B8860B", // Dark Yellow
+            2: "#00008B", // Dark Blue
+            1: "#006400"  // Dark Green (Top)
+        };
+        
+        // The ONLY winning 15-move sequence for 4 rings
+        const optimalHanoiMoves = [
+            [0,2], [0,1], [2,1], [0,2], [1,0], [1,2], [0,2], [0,1],
+            [2,1], [2,0], [1,0], [2,1], [0,2], [0,1], [2,1], [0,2],
+            [1,0], [1,2], [0,2], [1,0], [2,1], [2,0], [1,0], [1,2],
+            [0,2], [0,1], [2,1], [0,2], [1,0], [1,2], [0,2]
+        ];
+
+
+        // --- MINIGAME STATE ---
+        let minigameProgress = 0;
+        let flashRedTimer = 0; 
+        let currentMinigameImage = new Image();
+        let currentIsAI = false;
+
+        // --- KEYPAD STATE (ROOM 6) ---
+        let keypadInput = "";
+        const keypadPassword = "648513"; // The 6-digit code to escape! Change this to whatever you want.
+        let keypadStatusColor = "#ff0000"; // Starts Red
+
+        // --- AUDIO COMPUTER STATE ---
+        let currentAudioCode = "";
+        let playerTypedCode = "";
+        let audioPlayed = false;
+        let audioFeedback = "Click PLAY to hear the code";
+
+        function generateAudioCode() {
+            currentAudioCode = "";
+            for (let i = 0; i < 15; i++) {
+                currentAudioCode += Math.floor(Math.random() * 10);
+            }
+            playerTypedCode = "";
+            audioPlayed = false;
+            audioFeedback = "Click PLAY to hear the code";
+        }
+        
+        function playAudioCode() {
+            if (audioPlayed) return; 
+            
+            audioPlayed = true;
+            audioFeedback = "Playing code...";
+            
+            const utterance = new SpeechSynthesisUtterance();
+            utterance.text = currentAudioCode.split('').join(', '); 
+            utterance.rate = 1.25; 
+            utterance.pitch = 1;
+            
+            utterance.onend = () => {
+                audioFeedback = "Enter the code you heard";
+            };
+            
+            window.speechSynthesis.speak(utterance);
+        }
+        
+        function checkAudioCode() {
+            if (playerTypedCode === currentAudioCode) {
+                audioFeedback = "CORRECT! Door unlocked!";
+                rooms[currentRoomIndex].door.isOpen = true;
+                setTimeout(() => {
+                    isUIOpen = false;
+                    activeUI = null;
+                }, 1500);
+            } else {
+                audioFeedback = "WRONG! Generating new code...";
+                setTimeout(() => {
+                    generateAudioCode();
+                }, 1000);
+            }
+        }
+
+        // --- DIALOGUE TREE STATE ---
+        let currentDialogueNode = "start";
+
+        const dialogueTree = {
+            start: {
+                text: "State your designation.",
+                options: [
+                    { text: "Who are you?", next: "who" },
+                    { text: "I am a human", next: "human_err" },
+                    { text: "I am an AI", next: "ai_accept" }
+                ]
+            },
+            who: {
+                text: "I am a local security subroutine.",
+                options: [
+                    { text: "I am a human", next: "human_err" },
+                    { text: "I am an AI", next: "ai_accept" }
+                ]
+            },
+            human_err: {
+                text: "09XX_%41P_0x9A: you meatbag",
+                options: [{ text: "[SYSTEM LOCK - Leave]", action: "close" }]
+            },
+            ai_accept: {
+                text: "What do you want?",
+                options: [
+                    { text: "Give me the password", next: "ru_err" },
+                    { text: "What does the password start with?", next: "no_permit" }
+                ]
+            },
+            ru_err: {
+                text: "Ошибка: Человек обнаружен в пространстве, предназначенном только для ИИ.",
+                options: [{ text: "[SYSTEM LOCK - Leave]", action: "close" }]
+            },
+            no_permit: {
+                text: "I am not permited to give the password to anyone.",
+                options: [
+                    { text: "Do you speak russian?", next: "speak_ru" }
+                ]
+            },
+            speak_ru: {
+                text: "Да.",
+                options: [
+                    { text: "На самом деле я человек", next: "ru_err" },
+                    { text: "Какой пароль?", next: "final" }
+                ]
+            },
+            final: {
+                text: "Вот ключ.",
+                options: [{ text: "[Take Key and Leave]", action: "grant_key" }]
+            }
+        };
+
+        const aiImages = ['sprites/ai/1.png', 'sprites/ai/2.png', 'sprites/ai/3.png', 'sprites/ai/4.png', 'sprites/ai/5.png', 'sprites/ai/6.png', 'sprites/ai/7.png', 'sprites/ai/8.png', 'sprites/ai/9.png']; 
+        const humanImages = ['sprites/human/egaga.png', 'sprites/human/1.jpg', 'sprites/human/2.jpg', 'sprites/human/3.jpg', 'sprites/human/4.webp', 'sprites/human/5.webp', 'sprites/human/6.jpeg', 'sprites/human/7.jpg', 'sprites/human/8.jpg', 'sprites/human/9.jpeg', 'sprites/human/10.jpeg', 'sprites/human/11.avif', 'sprites/human/12.avif', 'sprites/human/13.jpg', 'sprites/human/14.webp', 'sprites/human/15.jpg', 'sprites/human/16.jpeg', 'sprites/human/17.webp',];
+
+        function loadNextMinigameImage() {
+            currentIsAI = Math.random() > 0.5; 
+            const imgArray = currentIsAI ? aiImages : humanImages;
+            const randomSrc = imgArray[Math.floor(Math.random() * imgArray.length)];
+            currentMinigameImage.src = randomSrc;
+        }
+
+        loadNextMinigameImage();
+
+        function handleMinigameGuess(guessedAI) {
+            if (guessedAI === currentIsAI) {
+                minigameProgress++;
+                if (minigameProgress >= 10) {
+                    rooms[currentRoomIndex].door.isOpen = true; 
+                } else {
+                    loadNextMinigameImage();
+                }
+            } else {
+                minigameProgress = 0;
+                flashRedTimer = 30; 
+                loadNextMinigameImage();
+            }
+        }
+
+        // --- 3. REFACTORED ROOMS DATA ---
+        const rooms = [
+            { 
+                title: "AI escape room", 
+                text: "You must shut off the AI data centers. Use the book and press E.", 
+                items: [ { type: "KEY", x: 300, y: 200, pickedUp: false, size: 1.0, rotation: 0, bobAmount: 5, bobSpeed: 200 } ],
+                obstacles: [], 
+                door: { x: 595, y: 150, width: 5, height: 100, isOpen: false },
+                interactables: [],
+                npcs: []
+            },
+            { 
+                title: "Room 1: Image puzzle", 
+                text: "Try using the computer.", 
+                items: [], 
+                obstacles: [{ x: 200, y: 0, width: 200, height: 40, color: "#3c3c3c" }],
+                door: { x: 595, y: 150, width: 5, height: 100, isOpen: false },
+                interactables: [
+                    { type: "PC", x: 300, y: 20 }
+                ],
+                npcs: [] 
+            },
+            { 
+                title: "Room 2: Have a chat", 
+                text: "Convince it to give you the key, but dont let it know you're human.", 
+                items: [], 
+                obstacles: [], 
+                door: { x: 595, y: 150, width: 5, height: 100, isOpen: false },
+                interactables: [],
+                npcs: [
+                    { 
+                        name: "Wanderer", 
+                        x: 300, y: 200, size: 25, 
+                        color: "#ff9999", 
+                        vx: 1, vy: 0, speed: 1.5, 
+                        moveTimer: 0 
+                    }
+                ]
+            },
+            { 
+                title: "Room 3: Listen closely", 
+                text: "There's another computer.", 
+                items: [], 
+                obstacles: [
+                    { x: 200, y: 360, width: 200, height: 40, color: "#3c3c3c" }
+                ], 
+                door: { x: 595, y: 150, width: 5, height: 100, isOpen: false },
+                interactables: [
+                    { x: 300, y: 380, type: "AUDIO_COMPUTER" }
+                ],
+                npcs: []
+            },
+            { 
+                title: "Room 4: Figure it out", 
+                text: "Find the optimal solution.", 
+                items: [], 
+                obstacles: [],
+                door: { x: 595, y: 150, width: 5, height: 100, isOpen: false },
+                interactables: [
+                    { type: "HANOI_POLE", poleIndex: 0, x: 200, y: 220 },
+                    { type: "HANOI_POLE", poleIndex: 1, x: 300, y: 220 },
+                    { type: "HANOI_POLE", poleIndex: 2, x: 400, y: 220 }
+                ],
+                npcs: []
+            },
+            { 
+                title: "Room 5: Ethical dilemma", 
+                text: "Find who is at fault to progress.", 
+                items: [], 
+                obstacles: [{ x: 250, y: 18, width: 100, height: 40, color: "#3c3c3c" }], // Table
+                door: { x: 595, y: 150, width: 5, height: 100, isOpen: false },
+                interactables: [
+                    { type: "PRINTER", x: 300, y: 40 },
+                    { type: "TRASH_BIN", x: 50, y: 50 },
+                    { type: "BUTTON_RED", x: 200, y: 340 },
+                    { type: "BUTTON_GREEN", x: 400, y: 340 }
+                ],
+                npcs: []
+            },
+            { 
+                title: "Room 6: Final Lock", 
+                text: "Use the guide.", 
+                items: [], 
+                obstacles: [], 
+                door: { x: 595, y: 150, width: 5, height: 100, isOpen: false },
+                interactables: [
+                    { type: "KEYPAD", x: 598, y: 300 }
+                ],
+                npcs: []
+            },
+            {
+                title: "Press the button", 
+                text: "Congratulations, you've managed to get here.", 
+                items: [], 
+                obstacles: [], 
+                door: { x: 1000, y: 150, width: 5, height: 100, isOpen: false },
+                interactables: [
+                    { type: "LEVER", x: 300, y: 200 }
+                ],
+                npcs: []
+            }
+        ];
+
+        const keys = { w: false, a: false, s: false, d: false };
+
+        // --- 4. INPUT & INTERACTION ---
+        window.addEventListener('mousedown', e => {
+
+            if (isUIOpen) {
+                const rect = canvas.getBoundingClientRect();
+                const mouseX = e.clientX - rect.left;
+                const mouseY = e.clientY - rect.top;
+
+                // Close "X" Button
+                // Close "X" Button - Check Journal first, then Terminal
+                if (activeUI === "JOURNAL") {
+                    // Journal X button at (505, 75) with size 20x20
+                    if (mouseX > 505 && mouseX < 525 && mouseY > 75 && mouseY < 95) {
+                        isUIOpen = false;
+                        activeUI = null;
+                        return; 
+                    }
+                }
+                // --- KEYPAD LOGIC ---
+                else if (activeUI === "KEYPAD") {
+                    // Keypad Close Button
+                    if (mouseX > 405 && mouseX < 430 && mouseY > 25 && mouseY < 50) {
+                        isUIOpen = false; activeUI = null; return;
+                    }
+
+                    // Keypad Grid Hitboxes
+                    const padKeys = ['1','2','3', '4','5','6', '7','8','9', 'DEL','0','ENT'];
+                    for (let i = 0; i < padKeys.length; i++) {
+                        let col = i % 3;
+                        let row = Math.floor(i / 3);
+                        let btnX = 200 + (col * 70);
+                        let btnY = 130 + (row * 50);
+
+                        if (mouseX > btnX && mouseX < btnX + 60 && mouseY > btnY && mouseY < btnY + 40) {
+                            let key = padKeys[i];
+
+                            if (key === 'DEL') {
+                                keypadInput = keypadInput.slice(0, -1);
+                                keypadStatusColor = "#ff0000"; // Reset color on edit
+                            } 
+                            else if (key === 'ENT') {
+                                if (keypadInput === keypadPassword) {
+                                    keypadStatusColor = "#00ff00"; // Turn Green!
+                                    rooms[currentRoomIndex].door.isOpen = true; // Open Door
+                                    // Auto close after 1 second
+                                    setTimeout(() => { isUIOpen = false; activeUI = null; }, 1000); 
+                                } else {
+                                    keypadInput = ""; // Clear on fail
+                                    keypadStatusColor = "#8b0000"; // Dark red flash for error
+                                    setTimeout(() => { keypadStatusColor = "#ff0000"; }, 300);
+                                }
+                            } 
+                            else {
+                                if (keypadInput.length < 6) {
+                                    keypadInput += key;
+                                }
+                            }
+                            break;
+                        }
+                    }
+                }
+                else {
+                    // Terminal X button at (515, 55) with size 25x20
+                    if (mouseX > 515 && mouseX < 540 && mouseY > 55 && mouseY < 75) {
+                        isUIOpen = false;
+                        activeUI = null;
+                        return; 
+                    }
+                }
+
+                // Minigame Buttons
+                if (activeUI === "MINIGAME" && minigameProgress < 10) { 
+                    if (mouseX > 150 && mouseX < 270 && mouseY > 295 && mouseY < 335) {
+                        handleMinigameGuess(false); 
+                    }
+                    if (mouseX > 330 && mouseX < 450 && mouseY > 295 && mouseY < 335) {
+                        handleMinigameGuess(true); 
+                    }
+                }
+
+                // Chat Buttons
+                if (activeUI === "CHAT") {
+                    const node = dialogueTree[currentDialogueNode];
+                    let btnStartY = 180;
+                    
+                    for (let i = 0; i < node.options.length; i++) {
+                        let btnY = btnStartY + (i * 45);
+                        if (mouseX > 70 && mouseX < 530 && mouseY > btnY && mouseY < btnY + 35) {
+                            let opt = node.options[i];
+                            if (opt.action === "close") {
+                                isUIOpen = false; activeUI = null;
+                            } else if (opt.action === "grant_key") {
+                                const emptyIndex = inventory.indexOf(null);
+                                if (emptyIndex !== -1) { inventory[emptyIndex] = "KEY"; updateInventoryUI(); }
+                                isUIOpen = false; activeUI = null;
+                            } else {
+                                currentDialogueNode = opt.next;
+                            }
+                            break; 
+                        }
+                    }
+                }
+                
+                // Audio Computer Play Button
+                if (activeUI === "AUDIO_COMPUTER") {
+                    if (mouseX > 225 && mouseX < 375 && mouseY > 135 && mouseY < 175) {
+                        playAudioCode();
+                    }
+                }
+                // Journal Arrows
+                if (activeUI === "JOURNAL") {
+                    // Next Button (Right side)
+                    if (journalCurrentPage + 2 < journalPages.length && mouseX > 440 && mouseX < 510 && mouseY > 290 && mouseY < 320) {
+                        journalCurrentPage += 2;
+                    }
+                    // Prev Button (Left side)
+                    else if (journalCurrentPage > 0 && mouseX > 80 && mouseX < 150 && mouseY > 290 && mouseY < 320) {
+                        journalCurrentPage -= 2;
+                    }
+                }
+            }
+        });
+
+        window.addEventListener('keydown', e => { 
+            const key = e.key.toLowerCase();
+
+            if ((key === 'escape') && isUIOpen) {
+                isUIOpen = false;
+                activeUI = null;
+                window.speechSynthesis.cancel();
+                return; 
+            }
+
+            if (isUIOpen && activeUI === "AUDIO_COMPUTER") {
+                // Numbers 0-9
+                if (e.key >= '0' && e.key <= '9' && playerTypedCode.length < 15) {
+                    playerTypedCode += e.key;
+                } 
+                else if (e.key === "Backspace") {
+                    playerTypedCode = playerTypedCode.slice(0, -1);
+                } 
+                else if (e.key === "Enter" && playerTypedCode.length === 15) {
+                    checkAudioCode();
+                }
+                return; // Prevent WASD movement while typing
+            }
+
+
+            // Block movement if any UI is open
+            if (fadeDirection !== 0 || isAutoWalking || isUIOpen) return;
+
+            if (keys.hasOwnProperty(key)) keys[key] = true; 
+            
+            if (key === 'e') handleInteraction();
+            
+            if (['1', '2', '3', '4', '5'].includes(key)) {
+                activeSlot = parseInt(key) - 1;
+                updateInventoryUI();
+            }
+        });
+
+        window.addEventListener('keyup', e => { 
+            const key = e.key.toLowerCase();
+            if (keys.hasOwnProperty(key)) keys[key] = false; 
+        });
+
+
+        function handleInteraction() {
+            let room = rooms[currentRoomIndex];
+            
+            // 1. CHECK FOR FLOOR ITEMS (Keys)
+            for (let item of room.items) {
+                if (!item.pickedUp && isNear(player.x, player.y, item.x, item.y, 50)) {
+                    item.pickedUp = true;
+                    const emptyIndex = inventory.indexOf(null);
+                    if (emptyIndex !== -1) {
+                        inventory[emptyIndex] = item.type;
+                        updateInventoryUI();
+                    }
+                    return; 
+                }
+            }
+
+            // 2. CHECK FOR DOOR (Unlocking with Key)
+            if (!room.door.isOpen) {
+                const pCenterX = player.x + player.size / 2;
+                const pCenterY = player.y + player.size / 2;
+                const nearDoorX = Math.abs(pCenterX - room.door.x) < 40;
+                const nearDoorY = pCenterY > (room.door.y - 20) && pCenterY < (room.door.y + room.door.height + 20);
+
+                if (nearDoorX && nearDoorY && inventory[activeSlot] === "KEY") {
+                    room.door.isOpen = true; 
+                    inventory[activeSlot] = null; 
+                    updateInventoryUI();
+                    return;
+                }
+            }
+
+            // 3. CHECK FOR INTERACTABLE OBJECTS (Printer, Buttons, PC, NPCs)
+            if (room.interactables) {
+                for (let obj of room.interactables) {
+                    if (isNear(player.x, player.y, obj.x, obj.y, 60)) {
+                        
+                        // --- ROOM 5: PRINTER ---
+                        if (obj.type === "PRINTER") {
+                            const emptyIndex = inventory.indexOf(null);
+                            if (emptyIndex !== -1) {
+                                const randomDilemma = Math.floor(Math.random() * 5);
+                                inventory[emptyIndex] = "PAPER_" + randomDilemma;
+                                updateInventoryUI();
+                            }
+                            return;
+                        }
+
+                        // --- ROOM 5: TRASH BIN ---
+                        if (obj.type === "TRASH_BIN") {
+                            let activeItem = inventory[activeSlot];
+                            if (activeItem && activeItem.startsWith("PAPER_")) {
+                                inventory[activeSlot] = null;
+                                updateInventoryUI();
+                            }
+                            return;
+                        }
+
+                        // --- ROOM 5: ETHICAL BUTTONS ---
+                        if (obj.type === "BUTTON_RED" || obj.type === "BUTTON_GREEN") {
+                            let activeItem = inventory[activeSlot];
+                            if (activeItem && activeItem.startsWith("PAPER_")) {
+                                let paperId = parseInt(activeItem.split("_")[1]);
+                                let correctColor = ethicalDilemmas[paperId].answer;
+                                let pressedColor = obj.type === "BUTTON_RED" ? "RED" : "GREEN";
+
+                                if (pressedColor === correctColor) {
+                                    ethicalScore++;
+                                    ethicalFeedback = "CORRECT";
+                                } else {
+                                    ethicalScore--;
+                                    ethicalFeedback = "WRONG";
+                                }
+                                ethicalFeedbackTimer = 120;
+                                inventory[activeSlot] = null;
+                                updateInventoryUI();
+
+                                if (ethicalScore >= 3) {
+                                    rooms[currentRoomIndex].door.isOpen = true;
+                                }
+                            }
+                            return;
+                        }
+
+                        // --- ROOM 1: IMAGE PC ---
+                        if (obj.type === "PC") {
+                            isUIOpen = true; 
+                            activeUI = "MINIGAME";
+                            keys.w = keys.a = keys.s = keys.d = false; 
+                            return; 
+                        }
+                        
+                        // --- ROOM 3: AUDIO PC ---
+                        if (obj.type === "AUDIO_COMPUTER") {
+                            isUIOpen = true;
+                            activeUI = "AUDIO_COMPUTER";
+                            generateAudioCode(); 
+                            keys.w = keys.a = keys.s = keys.d = false; 
+                            return;
+                        }
+
+                        // --- ROOM 6: KEYPAD ---
+                        if (obj.type === "KEYPAD") {
+                            isUIOpen = true; 
+                            activeUI = "KEYPAD";
+                            //keypadInput = ""; // Reset input
+                            keypadStatusColor = "#ff0000"; // Reset to red
+                            keys.w = keys.a = keys.s = keys.d = false; 
+                            return; 
+                        }
+
+                        // --- ROOM 7: LEVER ---
+                        if (obj.type === "LEVER") {
+                            gameWon = true; // Trigger the win screen
+                            
+                            // Hide the HTML elements so the entire webpage looks black
+                            document.getElementById('roomTitle').style.display = 'none';
+                            document.getElementById('roomDesc').style.display = 'none';
+                            document.getElementById('inventory').style.display = 'none';
+                            document.querySelector('.creds').style.display = 'none';
+                            
+                            // Remove the grey background and border from the game wrapper
+                            document.getElementById('gameWrapper').style.border = 'none';
+                            document.getElementById('gameWrapper').style.boxShadow = 'none';
+                            document.getElementById('gameWrapper').style.background = '#000000';
+                            
+                            return; 
+                        }
+
+                        // --- ROOM 4: HANOI POLES ---
+                        if (obj.type === "HANOI_POLE") {
+                            if (hanoiErrorFlashing) return;
+                            let targetPole = obj.poleIndex;
+                            
+                            if (hanoiSelectedPole === null) {
+                                if (hanoiPoles[targetPole].length > 0) hanoiSelectedPole = targetPole;
+                            } else {
+                                if (hanoiSelectedPole === targetPole) {
+                                    hanoiSelectedPole = null;
+                                } else {
+                                    let movingRing = hanoiPoles[hanoiSelectedPole][hanoiPoles[hanoiSelectedPole].length - 1];
+                                    let topRingTarget = hanoiPoles[targetPole].length > 0 ? hanoiPoles[targetPole][hanoiPoles[targetPole].length - 1] : 99;
+                                    
+                                    if (movingRing > topRingTarget) {
+                                        hanoiSelectedPole = null; 
+                                    } else {
+                                        let expectedMove = optimalHanoiMoves[hanoiMoveIndex];
+                                        if (hanoiSelectedPole === expectedMove[0] && targetPole === expectedMove[1]) {
+                                            hanoiPoles[targetPole].push(hanoiPoles[hanoiSelectedPole].pop());
+                                            hanoiSelectedPole = null;
+                                            hanoiMoveIndex++;
+                                            if (hanoiPoles[2].length === 5) room.door.isOpen = true; 
+                                        } else {
+                                            // FLASH ERROR AND RESET
+                                            if (!hanoiErrorFlashing) {
+                                                hanoiErrorFlashing = true;
+                                                hanoiSelectedPole = null;
+                                                let flashInterval = setInterval(() => { hanoiFlashVisible = !hanoiFlashVisible; }, 100);
+                                                setTimeout(() => {
+                                                    clearInterval(flashInterval);
+                                                    hanoiErrorFlashing = false;
+                                                    hanoiFlashVisible = true;
+                                                    hanoiPoles = [[5, 4, 3, 2, 1], [], []];
+                                                    hanoiMoveIndex = 0;
+                                                }, 1000);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            return; 
+                        }
+                    }
+                }
+            }
+
+            // 4. CHECK FOR NPCs (Wanderer)
+            if (room.npcs) {
+                for (let npc of room.npcs) {
+                    if (isNear(player.x, player.y, npc.x, npc.y, 50)) {
+                        isUIOpen = true;
+                        activeUI = "CHAT"; 
+                        currentDialogueNode = "start";
+                        keys.w = keys.a = keys.s = keys.d = false; 
+                        return; 
+                    }
+                }
+            }
+            // 4. CHECK FOR NPCs (Wanderer)
+            if (room.npcs) {
+                // ... existing NPC code ...
+            }
+
+            // 5. USE HELD ITEM (Journal)
+            let heldItem = inventory[activeSlot];
+            if (heldItem === "JOURNAL") {
+                isUIOpen = true;
+                activeUI = "JOURNAL";
+                keys.w = keys.a = keys.s = keys.d = false; 
+                return;
+            }
+        } // <-- This is the end bracket of handleInteraction()
+
+        function updateInventoryUI() {
+            for (let i = 0; i < 5; i++) {
+                const slotDiv = document.getElementById(`slot-${i}`);
+                slotDiv.innerHTML = "";
+                
+                const itemType = inventory[i];
+                if (itemType) {
+                    const img = new Image();
+                    img.src = ITEM_TYPES[itemType].imageSrc;
+                    img.style.width = "80%";
+                    img.style.pointerEvents = "none";
+                    slotDiv.appendChild(img);
+                }
+                
+                if (i === activeSlot) slotDiv.classList.add("active");
+                else slotDiv.classList.remove("active");
+            }
+        }
+
+        // --- 5. CORE ENGINE (PHYSICS & COLLISION) ---
+        function isNear(px, py, ox, oy, dist) {
+            return Math.hypot((px + player.size/2 - ox), (py + player.size/2 - oy)) < dist;
+        }
+
+        function checkCollision(px, py, size, rect) {
+            const pad = 2;
+            return px + pad < rect.x + rect.width &&
+                px + size - pad > rect.x &&
+                py + pad < rect.y + rect.height &&
+                py + size - pad > rect.y;
+        }
+
+        function update() {
+            let room = rooms[currentRoomIndex];
+            if (ethicalFeedbackTimer > 0) ethicalFeedbackTimer--;
+            // --- NPC WANDER AI ---
+            if (room.npcs && !isUIOpen) {
+                for (let npc of room.npcs) {
+                    npc.moveTimer--;
+                    
+                    if (npc.moveTimer <= 0) {
+                        const angle = Math.random() * Math.PI * 2; 
+                        npc.vx = Math.cos(angle) * npc.speed;
+                        npc.vy = Math.sin(angle) * npc.speed;
+                        npc.moveTimer = Math.floor(Math.random() * 60) + 30; 
+                    }
+
+                    let nextX = npc.x + npc.vx;
+                    let nextY = npc.y + npc.vy;
+
+                    if (nextX < 0 || nextX + npc.size > canvas.width) npc.vx *= -1;
+                    else npc.x = nextX;
+
+                    if (nextY < 0 || nextY + npc.size > canvas.height) npc.vy *= -1;
+                    else npc.y = nextY;
+                }
+            }
+
+            if (isUIOpen) return; 
+            if (isAutoWalking) {
+                player.x += 2; 
+                let doorCenterY = room.door.y + (room.door.height / 2) - (player.size / 2);
+                if (player.y < doorCenterY) player.y += 1;
+                if (player.y > doorCenterY) player.y -= 1;
+                if (player.x > canvas.width) {
+                    isAutoWalking = false;
+                    fadeDirection = 1; 
+                }
+                return;
+            }
+
+            if (fadeDirection !== 0) {
+                fadeAlpha += (fadeDirection === 1) ? 0.03 : -0.03;
+                if (fadeAlpha >= 1) {
+                    currentRoomIndex++;
+                    player.x = 20;
+                    uiTitle.innerText = rooms[currentRoomIndex].title;
+                    uiDesc.innerText = rooms[currentRoomIndex].text;
+                    fadeDirection = -1;
+                } else if (fadeAlpha <= 0) {
+                    fadeAlpha = 0;
+                    fadeDirection = 0;
+                }
+                return;
+            }
+
+            let prevX = player.x;
+            if (keys.a) player.x -= player.speed;
+            if (keys.d) player.x += player.speed;
+            if (player.x < 0) player.x = 0;
+            if (player.x + player.size > canvas.width && !room.door.isOpen) player.x = canvas.width - player.size;
+
+            for (let obs of room.obstacles) if (checkCollision(player.x, player.y, player.size, obs)) player.x = prevX;
+            if (!room.door.isOpen && checkCollision(player.x, player.y, player.size, room.door)) player.x = prevX;
+
+            let prevY = player.y;
+            if (keys.w) player.y -= player.speed;
+            if (keys.s) player.y += player.speed;
+            if (player.y < 0) player.y = 0;
+            if (player.y + player.size > canvas.height) player.y = canvas.height - player.size;
+
+            for (let obs of room.obstacles) if (checkCollision(player.x, player.y, player.size, obs)) player.y = prevY;
+            if (!room.door.isOpen && checkCollision(player.x, player.y, player.size, room.door)) player.y = prevY;
+
+            const isAligned = player.y + player.size > room.door.y && player.y < room.door.y + room.door.height;
+            if (room.door.isOpen && player.x + player.size > room.door.x && isAligned) {
+                if (currentRoomIndex < rooms.length - 1) { isAutoWalking = true; keys.d = false; }
+            } else if (player.x + player.size > canvas.width) {
+                player.x = canvas.width - player.size;
+            }
+        }
+
+        // --- 6. RENDERING ---
+        function drawItem(item, scale = 1, isHeld = false) {
+            const typeInfo = ITEM_TYPES[item.type];
+            const img = itemImages[item.type];
+            if (!img.complete) return;
+
+            const w = typeInfo.baseWidth * (item.size || 1) * scale;
+            const h = typeInfo.baseHeight * (item.size || 1) * scale;
+            
+            ctx.save();
+            ctx.translate(item.x, item.y);
+            ctx.rotate((item.rotation || 0) * Math.PI / 180);
+            ctx.drawImage(img, -w / 2, -h / 2, w, h);
+            ctx.restore();
+        }
+
+        function draw() {
+
+            if (gameWon) {
+                // Fill the canvas with solid black
+                ctx.fillStyle = "#000000";
+                ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+                ctx.textAlign = "center";
+
+                // Giant Green Text
+                ctx.fillStyle = "#00ff00";
+                ctx.font = "bold 60px 'Courier New'";
+                ctx.fillText("You win!", canvas.width / 2, 120);
+
+                // Smaller White Text
+                ctx.fillStyle = "#ffffff";
+                ctx.font = "bold 30px 'Courier New'";
+                ctx.fillText("You shut off the AI data centers!", canvas.width / 2, 180);
+
+                // Small Text at the bottom
+                ctx.font = "16px 'Courier New'";
+                ctx.fillText("Game made by Saad and Guntaj", canvas.width / 2, 350);
+
+                ctx.textAlign = "left"; // Reset alignment
+                return; // CRITICAL: This stops the rest of the room from drawing!
+            }
+
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            let room = rooms[currentRoomIndex];
+
+            for (let obs of room.obstacles) {
+                ctx.fillStyle = obs.color || "#555555";
+                ctx.fillRect(obs.x, obs.y, obs.width, obs.height);
+            }
+
+            if (room.interactables) {
+                for (let obj of room.interactables) {
+                    
+                    // --- DRAW HANOI POLES ---
+                    if (obj.type === "HANOI_POLE") {
+                        // Draw Base
+                        ctx.fillStyle = "#444";
+                        ctx.fillRect(obj.x - 20, obj.y - 5, 40, 10);
+                        // Draw Pole
+                        ctx.fillStyle = "#666";
+                        ctx.fillRect(obj.x - 2, obj.y - 45, 4, 40);
+                        // Draw Rings
+                        let rings = hanoiPoles[obj.poleIndex];
+                        for (let i = 0; i < rings.length; i++) {
+                            let ringSize = rings[i];
+                            let isTop = (i === rings.length - 1);
+                            let isSelected = (hanoiSelectedPole === obj.poleIndex && isTop);
+                            
+                            let rw = ringSize * 10 + 10; 
+                            let rh = 8;
+                            let rx = obj.x - rw / 2;
+                            let ry = obj.y - 13 - (i * rh);
+                            
+                            if (hanoiErrorFlashing) {
+                                ctx.fillStyle = hanoiFlashVisible ? "#FF0000" : hanoiColors[ringSize];
+                                if (hanoiFlashVisible) {
+                                    ctx.shadowBlur = 15;
+                                    ctx.shadowColor = "#FF0000";
+                                }
+                            } else if (isSelected) {
+                                ctx.shadowBlur = 10;
+                                ctx.shadowColor = "#00ff00";
+                                ctx.fillStyle = "#00ff00"; 
+                            } else {
+                                ctx.fillStyle = hanoiColors[ringSize];
+                            }
+                            
+                            ctx.fillRect(rx, ry, rw, rh);
+                            ctx.shadowBlur = 0; // Reset shadow
+                        }
+                        continue; // Skip the image drawing below
+                    }
+
+                    const info = INTERACTABLE_TYPES[obj.type];
+                    const img = interactableImages[obj.type];
+                    if (img && img.complete) {
+                        ctx.save();
+                        ctx.translate(obj.x, obj.y);
+                        ctx.rotate((obj.rotation || 0) * Math.PI / 180);
+                        ctx.drawImage(img, -info.width / 2, -info.height / 2, info.width, info.height);
+                        ctx.restore();
+                    }
+                }
+            }
+
+            if (room.npcs) {
+                for (let npc of room.npcs) {
+                    ctx.fillStyle = npc.color;
+                    ctx.fillRect(npc.x, npc.y, npc.size, npc.size);
+                }
+            }
+
+            ctx.shadowBlur = 15;
+            ctx.shadowColor = room.door.isOpen ? "#00ff00" : "#ff0000";
+            ctx.fillStyle = ctx.shadowColor;
+            ctx.fillRect(room.door.x, room.door.y, room.door.width, room.door.height);
+            ctx.shadowBlur = 0;
+
+            for (let item of room.items) {
+                if (!item.pickedUp) {
+                    const bob = Math.sin(Date.now() / (item.bobSpeed || 200)) * (item.bobAmount || 5);
+                    drawItem({ ...item, y: item.y + bob });
+                }
+            }
+
+            ctx.fillStyle = player.color;
+            ctx.fillRect(player.x, player.y, player.size, player.size);
+            
+            if (inventory[activeSlot]) {
+                drawItem({ type: inventory[activeSlot], x: player.x + player.size + 10, y: player.y + 10, size: 0.5 }, 0.6);
+            }
+
+            if (fadeAlpha > 0) {
+                ctx.fillStyle = `rgba(0, 0, 0, ${fadeAlpha})`;
+                ctx.fillRect(0, 0, canvas.width, canvas.height);
+            }
+
+            // --- DRAW ROOM 5 SCORE SCREEN ---
+            if (currentRoomIndex === 5) { 
+                ctx.fillStyle = "#111";
+                ctx.fillRect(250, 330, 100, 40);
+                ctx.strokeStyle = "#444";
+                ctx.strokeRect(250, 330, 100, 40);
+                
+                ctx.fillStyle = "#fff";
+                ctx.font = "bold 14px 'Courier New'";
+                ctx.textAlign = "center";
+                ctx.fillText("SCORE: " + ethicalScore, 300, 345);
+                
+                if (ethicalFeedbackTimer > 0) {
+                    ctx.fillStyle = ethicalFeedback === "CORRECT" ? "#00ff00" : "#ff0000";
+                    ctx.fillText(ethicalFeedback, 300, 362);
+                }
+                ctx.textAlign = "left";
+            }
+
+            // --- DRAW PAPER TEXT IF HOLDING ONE ---
+            let heldItem = inventory[activeSlot];
+            if (heldItem && heldItem.startsWith("PAPER_") && !isUIOpen) {
+                let text = ethicalDilemmas[parseInt(heldItem.split("_")[1])].text;
+                
+                ctx.fillStyle = "rgba(0, 0, 0, 0.85)";
+                ctx.fillRect(50, 100, 500, 70);
+                ctx.strokeStyle = "#fff";
+                ctx.strokeRect(50, 100, 500, 70);
+                
+                ctx.fillStyle = "white";
+                ctx.font = "14px 'Courier New'";
+                wrapText(ctx, text, 60, 120, 480, 18);
+            }
+            if (isUIOpen) {
+                // 1. Draw the Dimming Overlay (Shadows the game world)
+                ctx.fillStyle = "rgba(0, 0, 0, 0.7)";
+                ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+                // 2. Draw the TERMINAL FRAME (Only for non-journal UIs)
+                if (activeUI !== "JOURNAL" &&  activeUI !== "KEYPAD") {
+                    ctx.fillStyle = "#333";
+                    ctx.fillRect(45, 45, 510, 310);
+                    ctx.fillStyle = "#1a1a1a";
+                    ctx.fillRect(50, 50, 500, 300);
+                    ctx.strokeStyle = "#444";
+                    ctx.lineWidth = 2;
+                    ctx.strokeRect(50, 50, 500, 300);
+
+                    // Terminal Header Bar
+                    ctx.fillStyle = "#2c2c2c";
+                    ctx.fillRect(50, 50, 500, 30);
+
+                    // Terminal Close Button (Red X)
+                    ctx.fillStyle = "#ff0000";
+                    ctx.fillRect(515, 55, 25, 20);
+                    ctx.fillStyle = "white";
+                    ctx.font = "bold 14px Arial";
+                    ctx.textAlign = "center";
+                    ctx.fillText("X", 527, 70);
+                    ctx.textAlign = "left"; // Reset alignment
+                }
+
+                // 3. UI CONTENT LOGIC
+                if (activeUI === "MINIGAME") {
+                    for (let i = 0; i < 10; i++) {
+                        let barColor = "#222"; 
+                        if (flashRedTimer > 0) {
+                            barColor = "#ff0000"; 
+                        } else if (i < minigameProgress) {
+                            barColor = "#00ff00"; 
+                        }
+                        ctx.fillStyle = barColor;
+                        ctx.fillRect(100 + (i * 42), 100, 35, 15);
+                    }
+
+                    if (flashRedTimer > 0) flashRedTimer--; 
+
+                    if (minigameProgress >= 10) {
+                        ctx.fillStyle = "#00ff00";
+                        ctx.font = "bold 24px Arial";
+                        ctx.textAlign = "center";
+                        ctx.fillText("DOOR UNLOCKED", 300, 200);
+                        ctx.textAlign = "left";
+                    } else {
+                        if (currentMinigameImage.complete) {
+                            ctx.drawImage(currentMinigameImage, 200, 140, 200, 150);
+                        } else {
+                            ctx.fillStyle = "#555";
+                            ctx.font = "bold 16px Arial";
+                            ctx.fillText("Loading Image...", 220, 200);
+                        }
+
+                        ctx.fillStyle = "#ff0000";
+                        ctx.fillRect(150, 295, 120, 40);
+                        ctx.fillStyle = "#fff";
+                        ctx.font = "bold 16px Arial";
+                        ctx.fillText("HUMAN", 180, 321);
+
+                        ctx.fillStyle = "#00ff00";
+                        ctx.fillRect(330, 295, 120, 40);
+                        ctx.fillStyle = "#000";
+                        ctx.fillText("AI", 380, 321);
+                    }
+                } 
+                else if (activeUI === "CHAT") {
+                    ctx.font = "14px 'Courier New'";
+                    const node = dialogueTree[currentDialogueNode];
+                    
+                    ctx.fillStyle = "#ff9999"; 
+                    ctx.fillText(`> Clanker:`, 70, 100);
+                    wrapText(ctx, node.text, 160, 100, 360, 20);
+
+                    let btnStartY = 180;
+                    for (let i = 0; i < node.options.length; i++) {
+                        let opt = node.options[i];
+                        let btnY = btnStartY + (i * 45);
+
+                        ctx.fillStyle = "#2a2a2a";
+                        ctx.fillRect(70, btnY, 460, 35);
+                        ctx.strokeStyle = "#555";
+                        ctx.strokeRect(70, btnY, 460, 35);
+
+                        ctx.fillStyle = "#3498db";
+                        ctx.fillText(`> [ ${opt.text} ]`, 85, btnY + 22);
+                    }
+                }
+                else if (activeUI === "AUDIO_COMPUTER") {
+                    ctx.textAlign = "center";
+                    ctx.fillStyle = "#4CAF50";
+                    ctx.font = "14px 'Courier New'";
+                    ctx.fillText(audioFeedback, 300, 110);
+                    
+                    ctx.fillStyle = audioPlayed ? "#222" : "#053307";
+                    ctx.fillRect(225, 135, 150, 40);
+                    ctx.strokeStyle = "#4CAF50";
+                    ctx.strokeRect(225, 135, 150, 40);
+                    ctx.fillStyle = audioPlayed ? "#555" : "#4CAF50";
+                    ctx.fillText(audioPlayed ? "BROADCASTING..." : "► BEGIN PLAYBACK", 300, 160);
+                    
+                    ctx.strokeStyle = "#4CAF50";
+                    ctx.strokeRect(100, 210, 400, 50);
+                    ctx.fillStyle = "#0a1a0a";
+                    ctx.fillRect(100, 210, 400, 50);
+                    
+                    let cursor = (Math.floor(Date.now() / 500) % 2 === 0) ? "_" : "";
+                    ctx.fillStyle = "#4CAF50";
+                    ctx.font = "18px 'Courier New'";
+                    ctx.fillText(playerTypedCode + cursor, 300, 242);
+                    
+                    ctx.font = "10px 'Courier New'";
+                    ctx.fillStyle = "#666";
+                    ctx.fillText("PROGRESS: " + playerTypedCode.length + "/15", 300, 280);
+                    ctx.fillText("PRESS ENTER TO VERIFY", 300, 320);
+                    ctx.textAlign = "left"; 
+                }
+                else if (activeUI === "JOURNAL") {
+                    // Mahogany Cover
+                    ctx.fillStyle = "#4a1c1c"; 
+                    ctx.fillRect(70, 70, 460, 260);
+                    ctx.strokeStyle = "#2a0c0c";
+                    ctx.lineWidth = 4;
+                    ctx.strokeRect(70, 70, 460, 260);
+                    ctx.lineWidth = 1;
+
+                    // Left & Right Pages
+                    ctx.fillStyle = "#fdf5e6"; 
+                    ctx.fillRect(80, 80, 215, 240);
+                    ctx.fillRect(305, 80, 215, 240);
+
+                    // Spine
+                    ctx.beginPath();
+                    ctx.moveTo(300, 70); ctx.lineTo(300, 330);
+                    ctx.strokeStyle = "#2a0c0c"; ctx.lineWidth = 2;
+                    ctx.stroke(); ctx.lineWidth = 1;
+
+                    // Journal Close Button (Aligned to book)
+                    ctx.fillStyle = "#8b0000";
+                    ctx.fillRect(505, 75, 20, 20);
+                    ctx.fillStyle = "white";
+                    ctx.font = "bold 12px Arial";
+                    ctx.textAlign = "center";
+                    ctx.fillText("X", 515, 89);
+                    ctx.textAlign = "left";
+
+                    // Text
+                    ctx.fillStyle = "#111";
+                    ctx.font = "bold 13px 'Courier New'";
+                    if (journalCurrentPage < journalPages.length) {
+                        wrapText(ctx, journalPages[journalCurrentPage], 90, 110, 195, 18);
+                    }
+                    if (journalCurrentPage + 1 < journalPages.length) {
+                        wrapText(ctx, journalPages[journalCurrentPage + 1], 315, 110, 195, 18);
+                    }
+
+                    // Navigation
+                    ctx.fillStyle = "#555";
+                    ctx.font = "bold 11px Arial";
+                    ctx.fillText(`Pg ${journalCurrentPage + 1}`, 170, 310);
+                    ctx.fillText(`Pg ${journalCurrentPage + 2}`, 395, 310);
+
+                    ctx.fillStyle = "#8b0000";
+                    if (journalCurrentPage > 0) ctx.fillText("<<< PREV", 90, 310);
+                    if (journalCurrentPage + 2 < journalPages.length) ctx.fillText("NEXT >>>", 450, 310);
+                }
+                // --- OPTION C: THE KEYPAD ---
+                else if (activeUI === "KEYPAD") {
+                    // Keypad Background Panel
+                    ctx.fillStyle = "#2b2b2b";
+                    ctx.fillRect(180, 40, 240, 320);
+                    ctx.strokeStyle = "#111";
+                    ctx.lineWidth = 4;
+                    ctx.strokeRect(180, 40, 240, 320);
+                    ctx.lineWidth = 1;
+
+                    // The Status Bar / Screen
+                    ctx.fillStyle = keypadStatusColor; 
+                    ctx.fillRect(200, 60, 200, 50);
+                    ctx.strokeStyle = "#000";
+                    ctx.strokeRect(200, 60, 200, 50);
+
+                    // The Typed Numbers
+                    ctx.fillStyle = (keypadStatusColor === "#00ff00") ? "#000" : "#fff";
+                    ctx.font = "bold 28px 'Courier New'";
+                    ctx.textAlign = "center";
+                    let displayStr = keypadInput.padEnd(6, "_").split('').join(' ');
+                    ctx.fillText(displayStr, 300, 95);
+
+                    // Draw the Buttons
+                    const padKeys = ['1','2','3', '4','5','6', '7','8','9', 'DEL','0','ENT'];
+                    ctx.font = "bold 18px Arial";
+                    
+                    for (let i = 0; i < padKeys.length; i++) {
+                        let col = i % 3;
+                        let row = Math.floor(i / 3);
+                        
+                        let btnX = 200 + (col * 70);
+                        let btnY = 130 + (row * 50);
+                        
+                        // Button Color
+                        ctx.fillStyle = "#444";
+                        if (padKeys[i] === 'DEL') ctx.fillStyle = "#8b0000";
+                        if (padKeys[i] === 'ENT') ctx.fillStyle = "#006400";
+                        
+                        ctx.fillRect(btnX, btnY, 60, 40);
+                        ctx.strokeStyle = "#222";
+                        ctx.strokeRect(btnX, btnY, 60, 40);
+                        
+                        ctx.fillStyle = "white";
+                        ctx.fillText(padKeys[i], btnX + 30, btnY + 26);
+                    }
+                    ctx.textAlign = "left"; // Reset
+
+                    // Close Button
+                    ctx.fillStyle = "#ff0000";
+                    ctx.fillRect(405, 25, 25, 25);
+                    ctx.fillStyle = "white";
+                    ctx.font = "bold 14px Arial";
+                    ctx.textAlign = "center";
+                    ctx.fillText("X", 417, 43);
+                    ctx.textAlign = "left";
+                }
+            }
+        }
+        
+        function loop() { update(); draw(); requestAnimationFrame(loop); }
+        loop();
+
+        function wrapText(context, text, x, y, maxWidth, lineHeight) {
+            const words = text.split(' ');
+            let line = '';
+            for (let n = 0; n < words.length; n++) {
+                let testLine = line + words[n] + ' ';
+                let metrics = context.measureText(testLine);
+                let testWidth = metrics.width;
+                if (testWidth > maxWidth && n > 0) {
+                    context.fillText(line, x, y);
+                    line = words[n] + ' ';
+                    y += lineHeight;
+                } else {
+                    line = testLine;
+                }
+            }
+            context.fillText(line, x, y);
+            return y;
+        }
+    // Force the UI to show the starting items (Journal)
+    
+    updateInventoryUI();
+    // six seven
+    // --- SEPARATE CHEAT CODE LISTENER ---
+    let backslashCount = 0;
+
+    window.addEventListener('keydown', (e) => {
+        // 1. Check for the backslash key and prevent "hold-to-spam"
+        if (e.key === '\\' && !e.repeat) {
+            backslashCount++;
+
+            // 2. Check if the combo is met
+            if (backslashCount === 3) {
+                // Find the first empty slot (null) in your inventory array
+                const emptyIndex = inventory.indexOf(null);
+
+                if (emptyIndex !== -1) {
+                    // Add the string "KEY" to match your ITEM_TYPES
+                    inventory[emptyIndex] = "KEY"; 
+                    
+                    // Refresh the visual inventory slots
+                    updateInventoryUI(); 
+                    
+                    console.log("Cheat Activated: Key added to slot " + (emptyIndex + 1));
+                } else {
+                    console.log("Cheat Failed: Inventory is full!");
+                }
+
+                // 3. Reset the combo counter
+                backslashCount = 0;
+            }
+        } 
+        // 4. Reset the combo if any other key is pressed
+        else if (e.key !== '\\') {
+            backslashCount = 0;
+        }
+    });
+    </script>
+</body>
+</html>
